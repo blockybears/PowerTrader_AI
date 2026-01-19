@@ -114,7 +114,7 @@ class WrapFrame(ttk.Frame):
 
 class NeuralSignalTile(ttk.Frame):
 
-    def __init__(self, parent: tk.Widget, coin: str, bar_height: int = 52, levels: int = 8, trade_start_level: int = 3):
+    def __init__(self, parent: tk.Widget, coin: str, bar_height: int = 52, levels: int = 8):
         super().__init__(parent)
         self.coin = coin
 
@@ -186,14 +186,10 @@ class NeuralSignalTile(ttk.Frame):
                 )
             )
 
-        # Trade-start marker line (boundary before the trade-start level).
-        # Example: trade_start_level=3 => line after 2nd block (between 2 and 3).
-        self._trade_line_geom = (x0, x1, x2, x3, yb)
-        self._trade_line_long = self.canvas.create_line(x0, yb, x1, yb, fill=DARK_FG, width=2)
-        self._trade_line_short = self.canvas.create_line(x2, yb, x3, yb, fill=DARK_FG, width=2)
-        self._trade_start_level = 3
-        self.set_trade_start_level(trade_start_level)
-
+        # Marker line after the 2nd block (between 2 and 3) -- LONG side only.
+        # With display_levels=7, "after 2nd block" means boundary after seg index 1.
+        trade_y = int(round(yb - (2 * self._bar_h / self._display_levels)))
+        self.canvas.create_line(x0, trade_y, x1, trade_y, fill=DARK_FG, width=2)
 
         self.value_lbl = ttk.Label(self, text="L:0 S:0")
         self.value_lbl.pack(anchor="center", pady=(1, 0))
@@ -225,35 +221,6 @@ class NeuralSignalTile(ttk.Frame):
                 self.value_lbl.configure(foreground=self._normal_fg)
         except Exception:
             pass
-
-    def set_trade_start_level(self, level: Any) -> None:
-        """Move the marker line to the boundary before the chosen start level."""
-        self._trade_start_level = self._clamp_trade_start_level(level)
-        self._update_trade_lines()
-
-    def _clamp_trade_start_level(self, value: Any) -> int:
-        try:
-            v = int(float(value))
-        except Exception:
-            v = 3
-        # Trade starts at levels 1..display_levels (usually 1..7)
-        return max(1, min(v, self._display_levels))
-
-    def _update_trade_lines(self) -> None:
-        try:
-            x0, x1, x2, x3, yb = self._trade_line_geom
-        except Exception:
-            return
-
-        k = max(0, min(int(self._trade_start_level) - 1, self._display_levels))
-        y = int(round(yb - (k * self._bar_h / self._display_levels)))
-
-        try:
-            self.canvas.coords(self._trade_line_long, x0, y, x1, y)
-            self.canvas.coords(self._trade_line_short, x2, y, x3, y)
-        except Exception:
-            pass
-
 
 
     def _clamp_level(self, value: Any) -> int:
@@ -304,19 +271,8 @@ class NeuralSignalTile(ttk.Frame):
 # -----------------------------
 
 DEFAULT_SETTINGS = {
-    "main_neural_dir": "",
+    "main_neural_dir": "",  # if blank, defaults to project directory
     "coins": ["BTC", "ETH", "XRP", "BNB", "DOGE"],
-    "trade_start_level": 3,  # trade starts when long signal >= this level (1..7)
-    "start_allocation_pct": 0.005,  # % of total account value for initial entry (min $0.50 per coin)
-    "dca_multiplier": 2.0,  # DCA buy size = current value * this (2.0 => total scales ~3x per DCA)
-    "dca_levels": [-2.5, -5.0, -10.0, -20.0, -30.0, -40.0, -50.0],  # Hard DCA triggers (percent PnL)
-    "max_dca_buys_per_24h": 2,  # max DCA buys per coin in rolling 24h window (0 disables DCA buys)
-
-    # --- Trailing Profit Margin settings (used by pt_trader.py; shown in GUI settings) ---
-    "pm_start_pct_no_dca": 5.0,
-    "pm_start_pct_with_dca": 2.5,
-    "trailing_gap_pct": 0.5,
-
     "default_timeframe": "1hour",
     "timeframes": [
         "1min", "5min", "15min", "30min",
@@ -331,14 +287,16 @@ DEFAULT_SETTINGS = {
     "script_neural_trainer": "pt_trainer.py",
     "script_trader": "pt_trader.py",
     "auto_start_scripts": False,
+    "allocation_defaults": {
+        "strategy": "percentage_per_coin",  # Keep current behavior as default
+        "initial_amount": 0.005,  # 0.005% (matches current 0.00005)
+        "dca_multiplier": 2.0,
+        "dca_max_levels": 7,
+        "dca_start_from_level": 0,
+        "min_trade_amount": 0.5
+    },
+    "allocation_per_coin": {}  # Empty dict = use defaults for all
 }
-
-
-
-
-
-
-
 
 
 
@@ -820,9 +778,7 @@ class CandleChart(ttk.Frame):
         current_sell_price: Optional[float] = None,
         trail_line: Optional[float] = None,
         dca_line_price: Optional[float] = None,
-        avg_cost_basis: Optional[float] = None,
     ) -> None:
-
 
 
         cfg = self.settings_getter()
@@ -957,13 +913,6 @@ class CandleChart(ttk.Frame):
         except Exception:
             pass
 
-        # Overlay avg cost basis (yellow)
-        try:
-            if avg_cost_basis is not None and float(avg_cost_basis) > 0:
-                self.ax.axhline(y=float(avg_cost_basis), linewidth=1.5, color="yellow", alpha=0.95)
-        except Exception:
-            pass
-
         # Overlay current ask/bid prices
         try:
             if current_buy_price is not None and float(current_buy_price) > 0:
@@ -977,7 +926,7 @@ class CandleChart(ttk.Frame):
         except Exception:
             pass
 
-        # Right-side price labels (so you can read Bid/Ask/AVG/DCA/Sell at a glance)
+        # Right-side price labels (so you can read Bid/Ask/DCA/Sell at a glance)
         try:
             trans = blended_transform_factory(self.ax.transAxes, self.ax.transData)
             used_y: List[float] = []
@@ -1019,16 +968,15 @@ class CandleChart(ttk.Frame):
                     clip_on=False,
                 )
 
+
+
             # Map to your terminology: Ask=buy line, Bid=sell line
             _label_right(current_buy_price, "ASK", "purple")
             _label_right(current_sell_price, "BID", "teal")
-            _label_right(avg_cost_basis, "AVG", "yellow")
             _label_right(dca_line_price, "DCA", "red")
             _label_right(trail_line, "SELL", "green")
-
         except Exception:
             pass
-
 
 
 
@@ -1326,49 +1274,35 @@ class AccountValueChart(ttk.Frame):
 
 
         # Downsample to <= 250 points by AVERAGING buckets instead of skipping points.
-        # IMPORTANT: never average the VERY FIRST or VERY LAST point.
-        # - First point should remain the true first historical value.
-        # - Last point should remain the true current/final account value (so the title and chart end match account info).
+        # This keeps the chart visually stable when new nearby values arrive.
         max_keep = min(max(2, int(self.max_points or 250)), 250)
         n = len(points)
 
         if n > max_keep:
-            first_pt = points[0]
-            last_pt = points[-1]
+            bucket_size = n / float(max_keep)
+            new_points: List[Tuple[float, float]] = []
 
-            mid_points = points[1:-1]
-            mid_n = len(mid_points)
-            keep_mid = max_keep - 2
+            for i in range(max_keep):
+                start = int(i * bucket_size)
+                end = int((i + 1) * bucket_size)
+                if end <= start:
+                    end = start + 1
+                if start >= n:
+                    break
+                if end > n:
+                    end = n
 
-            if keep_mid <= 0 or mid_n <= 0:
-                points = [first_pt, last_pt]
-            elif mid_n <= keep_mid:
-                points = [first_pt] + mid_points + [last_pt]
-            else:
-                bucket_size = mid_n / float(keep_mid)
-                new_mid: List[Tuple[float, float]] = []
+                bucket = points[start:end]
+                if not bucket:
+                    continue
 
-                for i in range(keep_mid):
-                    start = int(i * bucket_size)
-                    end = int((i + 1) * bucket_size)
-                    if end <= start:
-                        end = start + 1
-                    if start >= mid_n:
-                        break
-                    if end > mid_n:
-                        end = mid_n
+                # Average timestamp and account value within the bucket
+                avg_ts = sum(p[0] for p in bucket) / len(bucket)
+                avg_val = sum(p[1] for p in bucket) / len(bucket)
 
-                    bucket = mid_points[start:end]
-                    if not bucket:
-                        continue
+                new_points.append((avg_ts, avg_val))
 
-                    # Average timestamp and account value within the bucket (MID ONLY)
-                    avg_ts = sum(p[0] for p in bucket) / len(bucket)
-                    avg_val = sum(p[1] for p in bucket) / len(bucket)
-                    new_mid.append((avg_ts, avg_val))
-
-                points = [first_pt] + new_mid + [last_pt]
-
+            points = new_points
 
 
         # clear artists (fast) / fallback to cla()
@@ -1557,14 +1491,6 @@ class PowerTraderHub(tk.Tk):
         self.settings = self._load_settings()
 
         self.project_dir = os.path.abspath(os.path.dirname(__file__))
-
-        main_dir = str(self.settings.get("main_neural_dir") or "").strip()
-        if main_dir and not os.path.isabs(main_dir):
-            main_dir = os.path.abspath(os.path.join(self.project_dir, main_dir))
-        if (not main_dir) or (not os.path.isdir(main_dir)):
-            main_dir = self.project_dir
-        self.settings["main_neural_dir"] = main_dir
-
 
         # hub data dir
         hub_dir = self.settings.get("hub_data_dir") or os.path.join(self.project_dir, "hub_data")
@@ -1879,8 +1805,7 @@ class PowerTraderHub(tk.Tk):
     # ---- settings ----
 
     def _load_settings(self) -> dict:
-        settings_path = os.path.join(os.path.abspath(os.path.dirname(__file__)), SETTINGS_FILE)
-        data = _safe_read_json(settings_path)
+        data = _safe_read_json(SETTINGS_FILE)
         if not isinstance(data, dict):
             data = {}
 
@@ -1891,9 +1816,20 @@ class PowerTraderHub(tk.Tk):
         return merged
 
     def _save_settings(self) -> None:
-        settings_path = os.path.join(os.path.abspath(os.path.dirname(__file__)), SETTINGS_FILE)
-        _safe_write_json(settings_path, self.settings)
+        _safe_write_json(SETTINGS_FILE, self.settings)
 
+    def get_coin_allocation_config(self, coin: str) -> dict:
+        """
+        Get effective allocation config for a coin (merges defaults + overrides).
+
+        Returns dict with: strategy, initial_amount, dca_multiplier, etc.
+        """
+        defaults = self.settings.get("allocation_defaults", {})
+        per_coin = self.settings.get("allocation_per_coin", {})
+        coin_config = per_coin.get(coin, {})
+
+        # Merge: per-coin overrides defaults
+        return {**defaults, **coin_config}
 
     def _settings_getter(self) -> dict:
         return self.settings
@@ -2652,7 +2588,6 @@ class PowerTraderHub(tk.Tk):
                                 sell_px = pos.get("current_sell_price", None)
                                 trail_line = pos.get("trail_line", None)
                                 dca_line_price = pos.get("dca_line_price", None)
-                                avg_cost_basis = pos.get("avg_cost_basis", None)
 
                                 chart.refresh(
                                     self.coin_folders,
@@ -2660,9 +2595,7 @@ class PowerTraderHub(tk.Tk):
                                     current_sell_price=sell_px,
                                     trail_line=trail_line,
                                     dca_line_price=dca_line_price,
-                                    avg_cost_basis=avg_cost_basis,
                                 )
-
                             except Exception:
                                 pass
 
@@ -3452,7 +3385,6 @@ class PowerTraderHub(tk.Tk):
             sell_px = pos.get("current_sell_price", None)
             trail_line = pos.get("trail_line", None)
             dca_line_price = pos.get("dca_line_price", None)
-            avg_cost_basis = pos.get("avg_cost_basis", None)
 
             chart.refresh(
                 self.coin_folders,
@@ -3460,14 +3392,12 @@ class PowerTraderHub(tk.Tk):
                 current_sell_price=sell_px,
                 trail_line=trail_line,
                 dca_line_price=dca_line_price,
-                avg_cost_basis=avg_cost_basis,
             )
 
             # Keep the periodic refresh behavior consistent (prevents an immediate full refresh right after this).
             self._last_chart_refresh = time.time()
         except Exception:
             pass
-
 
     # ---- refresh loop ----
     def _drain_queue_to_text(self, q: "queue.Queue[str]", txt: tk.Text, max_lines: int = 2500) -> None:
@@ -3619,8 +3549,6 @@ class PowerTraderHub(tk.Tk):
                     sell_px = pos.get("current_sell_price", None)
                     trail_line = pos.get("trail_line", None)
                     dca_line_price = pos.get("dca_line_price", None)
-                    avg_cost_basis = pos.get("avg_cost_basis", None)
-
                     try:
                         chart.refresh(
                             self.coin_folders,
@@ -3628,11 +3556,9 @@ class PowerTraderHub(tk.Tk):
                             current_sell_price=sell_px,
                             trail_line=trail_line,
                             dca_line_price=dca_line_price,
-                            avg_cost_basis=avg_cost_basis,
                         )
                     except Exception:
                         pass
-
 
 
             self._last_chart_refresh = now
@@ -3707,8 +3633,6 @@ class PowerTraderHub(tk.Tk):
         try:
             total_val = float(acct.get("total_account_value", 0.0) or 0.0)
 
-            self._last_total_account_value = total_val
-
             self.lbl_acct_total_value.config(
                 text=f"Total Account Value: {_fmt_money(acct.get('total_account_value', None))}"
             )
@@ -3726,52 +3650,37 @@ class PowerTraderHub(tk.Tk):
                 pit_txt = "N/A"
             self.lbl_acct_percent_in_trade.config(text=f"Percent In Trade: {pit_txt}")
 
-
             # -------------------------
             # DCA affordability
-            # - Entry allocation mirrors pt_trader.py:
-            #     total_val * ((start_allocation_pct/100) / N) with min $0.50
-            # - Each DCA buy mirrors pt_trader.py: dca_amount = value * dca multiplier  (=> total scales ~(1+multiplier)x per DCA)
+            # - Entry allocation mirrors pt_trader.py: total_val * (0.00005 / N) with min $0.50
+            # - Each DCA buy mirrors pt_trader.py: dca_amount = value * 2  (=> total scales ~3x per DCA)
             # -------------------------
             coins = getattr(self, "coins", None) or []
-            n = len(coins)
+            n = len(coins) if len(coins) > 0 else 1
+
             spread_levels = 0
             single_levels = 0
 
             if total_val > 0.0:
-                alloc_pct = float(self.settings.get("start_allocation_pct", 0.005) or 0.005)
-                if alloc_pct < 0.0:
-                    alloc_pct = 0.0
-                alloc_frac = alloc_pct / 100.0
-
-                dca_mult = float(self.settings.get("dca_multiplier", 2.0) or 2.0)
-                if dca_mult < 0.0:
-                    dca_mult = 0.0
-                dca_factor = 1.0 + dca_mult
-
                 # Spread across all coins
-
-                alloc_spread = total_val * alloc_frac
+                alloc_spread = total_val * (0.00005 / n)
                 if alloc_spread < 0.5:
                     alloc_spread = 0.5
 
                 required = alloc_spread * n  # initial buys for all coins
-                while required > 0.0 and (required * dca_factor) <= (total_val + 1e-9):
-                    required *= dca_factor
+                while required > 0.0 and (required * 3.0) <= (total_val + 1e-9):
+                    required *= 3.0
                     spread_levels += 1
 
-
                 # All DCA into a single coin
-                alloc_single = total_val * alloc_frac
+                alloc_single = total_val * 0.00005
                 if alloc_single < 0.5:
                     alloc_single = 0.5
 
                 required = alloc_single  # initial buy for one coin
-                while required > 0.0 and (required * dca_factor) <= (total_val + 1e-9):
-                    required *= dca_factor
+                while required > 0.0 and (required * 3.0) <= (total_val + 1e-9):
+                    required *= 3.0
                     single_levels += 1
-
-
 
             # Show labels + number (one line each)
             self.lbl_acct_dca_spread.config(text=f"DCA Levels (spread): {spread_levels}")
@@ -3864,31 +3773,6 @@ class PowerTraderHub(tk.Tk):
 
             dca_stages = pos.get("dca_triggered_stages", 0)
             dca_24h = int(dca_24h_by_coin.get(str(coin).upper().strip(), 0))
-
-            # Display + heading reflect the current max DCA setting (hot-reload friendly)
-            try:
-                max_dca_24h = int(float(self.settings.get("max_dca_buys_per_24h", DEFAULT_SETTINGS.get("max_dca_buys_per_24h", 2)) or 2))
-            except Exception:
-                max_dca_24h = int(DEFAULT_SETTINGS.get("max_dca_buys_per_24h", 2) or 2)
-            if max_dca_24h < 0:
-                max_dca_24h = 0
-            try:
-                self.trades_tree.heading("dca_24h", text=f"DCA 24h (max {max_dca_24h})")
-            except Exception:
-                pass
-            dca_24h_display = f"{dca_24h}/{max_dca_24h}"
-
-
-            # Display + heading reflect trailing PM settings (hot-reload friendly)
-            try:
-                pm0 = float(self.settings.get("pm_start_pct_no_dca", DEFAULT_SETTINGS.get("pm_start_pct_no_dca", 5.0)) or 5.0)
-                pm1 = float(self.settings.get("pm_start_pct_with_dca", DEFAULT_SETTINGS.get("pm_start_pct_with_dca", 2.5)) or 2.5)
-                tg = float(self.settings.get("trailing_gap_pct", DEFAULT_SETTINGS.get("trailing_gap_pct", 0.5)) or 0.5)
-                self.trades_tree.heading("trail_line", text=f"Trail Line (start {pm0:g}/{pm1:g}%, gap {tg:g}%)")
-            except Exception:
-                pass
-
-
             next_dca = pos.get("next_dca_display", "")
 
             trail_line = pos.get("trail_line", 0.0)
@@ -3906,12 +3790,11 @@ class PowerTraderHub(tk.Tk):
                     _fmt_price(sell_price),
                     _fmt_pct(sell_pnl),
                     dca_stages,
-                    dca_24h_display,
+                    dca_24h,
                     next_dca,
                     _fmt_price(trail_line),  # trail line is a price level
                 ),
             )
-
 
 
 
@@ -4091,8 +3974,7 @@ class PowerTraderHub(tk.Tk):
         self.neural_tiles = {}
 
         for coin in (self.coins or []):
-            tile = NeuralSignalTile(self.neural_wrap, coin, trade_start_level=int(self.settings.get("trade_start_level", 3) or 3))
-
+            tile = NeuralSignalTile(self.neural_wrap, coin)
 
             # --- Hover highlighting (real, visible) ---
             def _on_enter(_e=None, t=tile):
@@ -4481,25 +4363,11 @@ class PowerTraderHub(tk.Tk):
                 # keep column alignment consistent
                 ttk.Label(frm, text="").grid(row=r, column=2, sticky="e", padx=(10, 0), pady=6)
 
-        main_dir_var = tk.StringVar(value=self.settings["main_neural_dir"])
+        # Show the effective neural directory (with fallback to project_dir if blank)
+        effective_neural_dir = self.settings.get("main_neural_dir") or self.project_dir
+        main_dir_var = tk.StringVar(value=effective_neural_dir)
         coins_var = tk.StringVar(value=",".join(self.settings["coins"]))
-        trade_start_level_var = tk.StringVar(value=str(self.settings.get("trade_start_level", 3)))
-        start_alloc_pct_var = tk.StringVar(value=str(self.settings.get("start_allocation_pct", 0.005)))
-        dca_mult_var = tk.StringVar(value=str(self.settings.get("dca_multiplier", 2.0)))
-        _dca_levels = self.settings.get("dca_levels", DEFAULT_SETTINGS.get("dca_levels", []))
-        if not isinstance(_dca_levels, list):
-            _dca_levels = DEFAULT_SETTINGS.get("dca_levels", [])
-        dca_levels_var = tk.StringVar(value=",".join(str(x) for x in _dca_levels))
-        max_dca_var = tk.StringVar(value=str(self.settings.get("max_dca_buys_per_24h", DEFAULT_SETTINGS.get("max_dca_buys_per_24h", 2))))
-
-        # --- Trailing PM settings (editable; hot-reload friendly) ---
-        pm_no_dca_var = tk.StringVar(value=str(self.settings.get("pm_start_pct_no_dca", DEFAULT_SETTINGS.get("pm_start_pct_no_dca", 5.0))))
-        pm_with_dca_var = tk.StringVar(value=str(self.settings.get("pm_start_pct_with_dca", DEFAULT_SETTINGS.get("pm_start_pct_with_dca", 2.5))))
-        trailing_gap_var = tk.StringVar(value=str(self.settings.get("trailing_gap_pct", DEFAULT_SETTINGS.get("trailing_gap_pct", 0.5))))
-
         hub_dir_var = tk.StringVar(value=self.settings.get("hub_data_dir", ""))
-
-
 
         neural_script_var = tk.StringVar(value=self.settings["script_neural_runner2"])
         trainer_script_var = tk.StringVar(value=self.settings.get("script_neural_trainer", "pt_trainer.py"))
@@ -4513,66 +4381,7 @@ class PowerTraderHub(tk.Tk):
         r = 0
         add_row(r, "Main neural folder:", main_dir_var, browse="dir"); r += 1
         add_row(r, "Coins (comma):", coins_var); r += 1
-        add_row(r, "Trade start level (1-7):", trade_start_level_var); r += 1
-
-        # Start allocation % (shows approx $/coin using the last known account value; always displays the $0.50 minimum)
-        ttk.Label(frm, text="Start allocation %:").grid(row=r, column=0, sticky="w", padx=(0, 10), pady=6)
-        ttk.Entry(frm, textvariable=start_alloc_pct_var).grid(row=r, column=1, sticky="ew", pady=6)
-
-        start_alloc_hint_var = tk.StringVar(value="")
-        ttk.Label(frm, textvariable=start_alloc_hint_var).grid(row=r, column=2, sticky="w", padx=(10, 0), pady=6)
-
-        def _update_start_alloc_hint(*_):
-            # Parse % (allow "0.01" or "0.01%")
-            try:
-                pct_txt = (start_alloc_pct_var.get() or "").strip().replace("%", "")
-                pct = float(pct_txt) if pct_txt else 0.0
-            except Exception:
-                pct = float(self.settings.get("start_allocation_pct", 0.005) or 0.005)
-
-            if pct < 0.0:
-                pct = 0.0
-
-            # Use the last account value we saw in trader_status.json (no extra API calls).
-            try:
-                total_val = float(getattr(self, "_last_total_account_value", 0.0) or 0.0)
-            except Exception:
-                total_val = 0.0
-
-            coins_list = [c.strip().upper() for c in (coins_var.get() or "").split(",") if c.strip()]
-            n_coins = len(coins_list) if coins_list else 1
-
-            per_coin = 0.0
-            if total_val > 0.0:
-                per_coin = total_val * (pct / 100.0)
-            if per_coin < 0.5:
-                per_coin = 0.5
-
-            if total_val > 0.0:
-                start_alloc_hint_var.set(f"≈ {_fmt_money(per_coin)} per coin (min $0.50)")
-            else:
-                start_alloc_hint_var.set("≈ $0.50 min per coin (needs account value)")
-
-        _update_start_alloc_hint()
-        start_alloc_pct_var.trace_add("write", _update_start_alloc_hint)
-        coins_var.trace_add("write", _update_start_alloc_hint)
-
-        r += 1
-
-        add_row(r, "DCA levels (% list):", dca_levels_var); r += 1
-
-        add_row(r, "DCA multiplier:", dca_mult_var); r += 1
-
-        add_row(r, "Max DCA buys / coin (rolling 24h):", max_dca_var); r += 1
-
-        add_row(r, "Trailing PM start % (no DCA):", pm_no_dca_var); r += 1
-        add_row(r, "Trailing PM start % (with DCA):", pm_with_dca_var); r += 1
-        add_row(r, "Trailing gap % (behind peak):", trailing_gap_var); r += 1
-
         add_row(r, "Hub data dir (optional):", hub_dir_var, browse="dir"); r += 1
-
-
-
 
         ttk.Separator(frm, orient="horizontal").grid(row=r, column=0, columnspan=3, sticky="ew", pady=10); r += 1
 
@@ -4580,45 +4389,43 @@ class PowerTraderHub(tk.Tk):
         add_row(r, "pt_trainer.py path:", trainer_script_var); r += 1
         add_row(r, "pt_trader.py path:", trader_script_var); r += 1
 
-        # --- Robinhood API setup (writes r_key.txt + r_secret.txt used by pt_trader.py) ---
-        def _api_paths() -> Tuple[str, str]:
-            key_path = os.path.join(self.project_dir, "r_key.txt")
-            secret_path = os.path.join(self.project_dir, "r_secret.txt")
-            return key_path, secret_path
+        # --- Exchange Configuration (CCXT-based, writes .env file used by pt_trader.py) ---
+        exchange_status_var = tk.StringVar(value="")
 
-        def _read_api_files() -> Tuple[str, str]:
-            key_path, secret_path = _api_paths()
+        def _refresh_exchange_status() -> None:
+            """Read .env and show current exchange + credential status."""
+            env_path = os.path.join(self.project_dir, ".env")
+
+            if not os.path.isfile(env_path):
+                exchange_status_var.set("Not configured ❌ (no .env file found)")
+                return
+
             try:
-                with open(key_path, "r", encoding="utf-8") as f:
-                    k = (f.read() or "").strip()
-            except Exception:
-                k = ""
-            try:
-                with open(secret_path, "r", encoding="utf-8") as f:
-                    s = (f.read() or "").strip()
-            except Exception:
-                s = ""
-            return k, s
+                from dotenv import dotenv_values
+                config = dotenv_values(env_path)
 
-        api_status_var = tk.StringVar(value="")
+                exchange_id = config.get("EXCHANGE_ID", "").strip()
+                api_key = config.get("API_KEY", "").strip()
+                api_secret = config.get("API_SECRET", "").strip()
 
-        def _refresh_api_status() -> None:
-            key_path, secret_path = _api_paths()
-            k, s = _read_api_files()
+                missing = []
+                if not exchange_id:
+                    missing.append("EXCHANGE_ID")
+                if not api_key:
+                    missing.append("API_KEY")
+                if not api_secret:
+                    missing.append("API_SECRET")
 
-            missing = []
-            if not k:
-                missing.append("r_key.txt (API Key)")
-            if not s:
-                missing.append("r_secret.txt (PRIVATE key)")
+                if missing:
+                    exchange_status_var.set(f"Incomplete ⚠️ (missing: {', '.join(missing)})")
+                else:
+                    exchange_status_var.set(f"Configured ✅ (Exchange: {exchange_id.upper()})")
 
-            if missing:
-                api_status_var.set("Not configured ❌ (missing " + ", ".join(missing) + ")")
-            else:
-                api_status_var.set("Configured ✅ (credentials found)")
+            except Exception as e:
+                exchange_status_var.set(f"Error reading .env: {e}")
 
-        def _open_api_folder() -> None:
-            """Open the folder where r_key.txt / r_secret.txt live."""
+        def _open_env_folder() -> None:
+            """Open the folder where .env lives."""
             try:
                 folder = os.path.abspath(self.project_dir)
                 if os.name == "nt":
@@ -4631,548 +4438,234 @@ class PowerTraderHub(tk.Tk):
             except Exception as e:
                 messagebox.showerror("Couldn't open folder", f"Tried to open:\n{self.project_dir}\n\nError:\n{e}")
 
-        def _clear_api_files() -> None:
-            """Delete r_key.txt / r_secret.txt (with a big confirmation)."""
-            key_path, secret_path = _api_paths()
+        def _clear_env_file() -> None:
+            """Delete .env file (with confirmation)."""
+            env_path = os.path.join(self.project_dir, ".env")
+
             if not messagebox.askyesno(
-                "Delete API credentials?",
-                "This will delete:\n"
-                f"  {key_path}\n"
-                f"  {secret_path}\n\n"
-                "After deleting, the trader can NOT authenticate until you run the setup wizard again.\n\n"
-                "Are you sure you want to delete these files?"
+                "Delete .env?",
+                f"This will delete:\n  {env_path}\n\n"
+                "The trader will NOT work until you configure credentials again.\n\n"
+                "Are you sure?"
             ):
                 return
 
             try:
-                if os.path.isfile(key_path):
-                    os.remove(key_path)
-                if os.path.isfile(secret_path):
-                    os.remove(secret_path)
+                if os.path.isfile(env_path):
+                    os.remove(env_path)
+                messagebox.showinfo("Deleted", "Deleted .env file")
+                _refresh_exchange_status()
             except Exception as e:
-                messagebox.showerror("Delete failed", f"Couldn't delete the files:\n\n{e}")
-                return
+                messagebox.showerror("Delete failed", f"Couldn't delete .env:\n\n{e}")
 
-            _refresh_api_status()
-            messagebox.showinfo("Deleted", "Deleted r_key.txt and r_secret.txt.")
-
-        def _open_robinhood_api_wizard() -> None:
+        def _open_exchange_wizard() -> None:
             """
-            Beginner-friendly wizard that creates + stores Robinhood Crypto Trading API credentials.
-
-            What we store:
-              - r_key.txt    = your Robinhood *API Key* (safe-ish to store, still treat as sensitive)
-              - r_secret.txt = your *PRIVATE key* (treat like a password — never share it)
+            Beginner-friendly wizard to configure exchange credentials (.env file).
             """
             import webbrowser
-            import base64
-            import platform
-            from datetime import datetime
-            import time
-
-            # Friendly dependency errors (laymen-proof)
-            try:
-                from cryptography.hazmat.primitives.asymmetric import ed25519
-                from cryptography.hazmat.primitives import serialization
-            except Exception:
-                messagebox.showerror(
-                    "Missing dependency",
-                    "The 'cryptography' package is required for Robinhood API setup.\n\n"
-                    "Fix: open a Command Prompt / Terminal in this folder and run:\n"
-                    "  pip install cryptography\n\n"
-                    "Then re-open this Setup Wizard."
-                )
-                return
-
-            try:
-                import requests  # for the 'Test credentials' button
-            except Exception:
-                requests = None
+            import tempfile
 
             wiz = tk.Toplevel(win)
-            wiz.title("Robinhood API Setup")
-            # Big enough to show the bottom buttons, but still scrolls if the window is resized smaller.
-            wiz.geometry("980x720")
-            wiz.minsize(860, 620)
+            wiz.title("Exchange Setup Wizard")
+            wiz.geometry("700x600")
+            wiz.minsize(650, 550)
             wiz.configure(bg=DARK_BG)
 
-            # Scrollable content area (same pattern as the Neural Levels scrollbar).
-            viewport = ttk.Frame(wiz)
-            viewport.pack(fill="both", expand=True, padx=12, pady=12)
-            viewport.grid_rowconfigure(0, weight=1)
-            viewport.grid_columnconfigure(0, weight=1)
-
-            wiz_canvas = tk.Canvas(
-                viewport,
-                bg=DARK_BG,
-                highlightthickness=1,
-                highlightbackground=DARK_BORDER,
-                bd=0,
-            )
-            wiz_canvas.grid(row=0, column=0, sticky="nsew")
-
-            wiz_scroll = ttk.Scrollbar(viewport, orient="vertical", command=wiz_canvas.yview)
-            wiz_scroll.grid(row=0, column=1, sticky="ns")
-            wiz_canvas.configure(yscrollcommand=wiz_scroll.set)
-
-            container = ttk.Frame(wiz_canvas)
-            wiz_window = wiz_canvas.create_window((0, 0), window=container, anchor="nw")
+            container = ttk.Frame(wiz, padding=15)
+            container.pack(fill="both", expand=True)
             container.columnconfigure(0, weight=1)
 
-            def _update_wiz_scrollbars(event=None) -> None:
-                """Update scrollregion + hide/show the scrollbar depending on overflow."""
+            # Step 1: Exchange selection
+            ttk.Label(container, text="Step 1: Select Exchange", font=("Arial", 12, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 10))
+
+            exchange_var = tk.StringVar(value="kucoin")
+
+            exchanges = [
+                ("KuCoin (Recommended)", "kucoin"),
+                ("Binance", "binance"),
+                ("Coinbase Pro", "coinbasepro"),
+                ("Kraken", "kraken"),
+                ("Bybit", "bybit"),
+            ]
+
+            for label, value in exchanges:
+                ttk.Radiobutton(container, text=label, variable=exchange_var, value=value).grid(row=len(exchanges)-exchanges.index((label, value)), column=0, sticky="w", padx=20)
+
+            # Step 2: Credentials
+            ttk.Label(container, text="Step 2: Enter API Credentials", font=("Arial", 12, "bold")).grid(row=len(exchanges)+2, column=0, sticky="w", pady=(20, 10))
+
+            cred_frame = ttk.Frame(container)
+            cred_frame.grid(row=len(exchanges)+3, column=0, sticky="ew", pady=5)
+            cred_frame.columnconfigure(1, weight=1)
+
+            ttk.Label(cred_frame, text="API Key:").grid(row=0, column=0, sticky="e", padx=(0, 10), pady=5)
+            key_entry = ttk.Entry(cred_frame, width=50)
+            key_entry.grid(row=0, column=1, sticky="ew", pady=5)
+
+            ttk.Label(cred_frame, text="API Secret:").grid(row=1, column=0, sticky="e", padx=(0, 10), pady=5)
+            secret_entry = ttk.Entry(cred_frame, width=50, show="*")
+            secret_entry.grid(row=1, column=1, sticky="ew", pady=5)
+
+            ttk.Label(cred_frame, text="Passphrase:").grid(row=2, column=0, sticky="e", padx=(0, 10), pady=5)
+            passphrase_entry = ttk.Entry(cred_frame, width=50, show="*")
+            passphrase_entry.grid(row=2, column=1, sticky="ew", pady=5)
+
+            ttk.Label(
+                container,
+                text="(Passphrase only required for KuCoin and Coinbase)",
+                font=("Arial", 9, "italic"),
+                foreground="gray"
+            ).grid(row=len(exchanges)+4, column=0, sticky="w", pady=(0, 10))
+
+            # Help text
+            help_text = tk.Text(container, height=6, wrap="word", font=("Arial", 9))
+            help_text.grid(row=len(exchanges)+5, column=0, sticky="ew", pady=10)
+            help_text.insert("1.0",
+                "How to get API credentials:\n"
+                "• KuCoin: https://www.kucoin.com/account/api\n"
+                "  Required permissions: General (View), Spot Trading (Trade)\n"
+                "• Binance: https://www.binance.com/en/my/settings/api-management\n"
+                "  Required permissions: Enable Reading, Enable Spot & Margin Trading\n"
+                "• Coinbase Pro: https://pro.coinbase.com/profile/api\n"
+            )
+            help_text.config(state="disabled")
+
+            # Test status
+            test_status_var = tk.StringVar(value="")
+            test_status_label = ttk.Label(container, textvariable=test_status_var, font=("Arial", 10))
+            test_status_label.grid(row=len(exchanges)+6, column=0, sticky="w", pady=5)
+
+            # Buttons
+            btn_frame = ttk.Frame(container)
+            btn_frame.grid(row=len(exchanges)+7, column=0, sticky="ew", pady=10)
+
+            def _test_connection():
+                """Test API credentials before saving."""
+                exchange_id = exchange_var.get()
+                api_key = key_entry.get().strip()
+                api_secret = secret_entry.get().strip()
+                api_passphrase = passphrase_entry.get().strip()
+
+                if not api_key or not api_secret:
+                    test_status_var.set("❌ API Key and Secret are required")
+                    return False
+
+                if exchange_id in ["kucoin", "coinbasepro"] and not api_passphrase:
+                    test_status_var.set(f"❌ {exchange_id} requires a Passphrase")
+                    return False
+
+                temp_env = None
                 try:
-                    c = wiz_canvas
-                    win_id = wiz_window
+                    # Write temp .env for testing
+                    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".env") as f:
+                        f.write(f"EXCHANGE_ID={exchange_id}\n")
+                        f.write(f"API_KEY={api_key}\n")
+                        f.write(f"API_SECRET={api_secret}\n")
+                        if api_passphrase:
+                            f.write(f"API_PASSPHRASE={api_passphrase}\n")
+                        temp_env = f.name
 
-                    c.update_idletasks()
-                    bbox = c.bbox(win_id)
-                    if not bbox:
-                        wiz_scroll.grid_remove()
-                        return
+                    # Test with CCXT
+                    from exchange_interface import ExchangeInterface
+                    test_exchange = ExchangeInterface(temp_env)
 
-                    c.configure(scrollregion=bbox)
-                    content_h = int(bbox[3] - bbox[1])
-                    view_h = int(c.winfo_height())
+                    # Verify correct exchange is loaded
+                    if test_exchange.exchange_id != exchange_id:
+                        test_status_var.set(f"❌ Error: Loaded {test_exchange.exchange_id} instead of {exchange_id}")
+                        return False
 
-                    if content_h > (view_h + 1):
-                        wiz_scroll.grid()
-                    else:
-                        wiz_scroll.grid_remove()
+                    # Try fetching balance (read-only test)
+                    balance = test_exchange.fetch_balance()
+
+                    test_status_var.set(f"✅ Connection successful! ({exchange_id})")
+                    return True
+
+                except Exception as e:
+                    error_msg = str(e)
+                    # Show exchange name if it's in the error
+                    test_status_var.set(f"❌ {exchange_id}: {error_msg[:80]}")
+                    return False
+
+                finally:
+                    # Always cleanup temp file
+                    if temp_env and os.path.exists(temp_env):
                         try:
-                            c.yview_moveto(0)
-                        except Exception:
+                            os.remove(temp_env)
+                        except:
                             pass
-                except Exception:
-                    pass
 
-            def _on_wiz_canvas_configure(e) -> None:
-                # Keep the inner frame exactly the canvas width so labels wrap nicely.
+            def _save_to_env():
+                """Save credentials to .env file."""
+                if not _test_connection():
+                    messagebox.showerror("Test failed", "Please fix the connection errors before saving.")
+                    return
+
+                exchange_id = exchange_var.get()
+                api_key = key_entry.get().strip()
+                api_secret = secret_entry.get().strip()
+                api_passphrase = passphrase_entry.get().strip()
+
+                env_path = os.path.join(self.project_dir, ".env")
+
                 try:
-                    wiz_canvas.itemconfigure(wiz_window, width=int(e.width))
-                except Exception:
-                    pass
-                _update_wiz_scrollbars()
+                    with open(env_path, "w", encoding="utf-8") as f:
+                        f.write(f"# PowerTrader Exchange Configuration\n")
+                        f.write(f"# Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+                        f.write(f"EXCHANGE_ID={exchange_id}\n")
+                        f.write(f"API_KEY={api_key}\n")
+                        f.write(f"API_SECRET={api_secret}\n")
+                        if api_passphrase:
+                            f.write(f"API_PASSPHRASE={api_passphrase}\n")
 
-            wiz_canvas.bind("<Configure>", _on_wiz_canvas_configure, add="+")
-            container.bind("<Configure>", _update_wiz_scrollbars, add="+")
+                    messagebox.showinfo("Saved", f"Credentials saved to .env\n\nExchange: {exchange_id}")
+                    _refresh_exchange_status()
+                    wiz.destroy()
 
-            def _wheel(e):
-                try:
-                    if wiz_scroll.winfo_ismapped():
-                        wiz_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
-                except Exception:
-                    pass
-
-            wiz_canvas.bind("<Enter>", lambda _e: wiz_canvas.focus_set(), add="+")
-            wiz_canvas.bind("<MouseWheel>", _wheel, add="+")  # Windows / Mac
-            wiz_canvas.bind("<Button-4>", lambda _e: wiz_canvas.yview_scroll(-3, "units"), add="+")  # Linux
-            wiz_canvas.bind("<Button-5>", lambda _e: wiz_canvas.yview_scroll(3, "units"), add="+")   # Linux
-
-
-            key_path, secret_path = _api_paths()
-
-            # Load any existing credentials so users can update without re-generating keys.
-            existing_api_key, existing_private_b64 = _read_api_files()
-            private_b64_state = {"value": (existing_private_b64 or "").strip()}
-
-            # -----------------------------
-            # Helpers (open folder, copy, etc.)
-            # -----------------------------
-            def _open_in_file_manager(path: str) -> None:
-                try:
-                    p = os.path.abspath(path)
-                    if os.name == "nt":
-                        os.startfile(p)  # type: ignore[attr-defined]
-                        return
-                    if sys.platform == "darwin":
-                        subprocess.Popen(["open", p])
-                        return
-                    subprocess.Popen(["xdg-open", p])
                 except Exception as e:
-                    messagebox.showerror("Couldn't open folder", f"Tried to open:\n{path}\n\nError:\n{e}")
+                    messagebox.showerror("Save failed", f"Couldn't write .env file:\n\n{e}")
 
-            def _copy_to_clipboard(txt: str, title: str = "Copied") -> None:
-                try:
-                    wiz.clipboard_clear()
-                    wiz.clipboard_append(txt)
-                    messagebox.showinfo(title, "Copied to clipboard.")
-                except Exception:
-                    pass
+            ttk.Button(btn_frame, text="Test Connection", command=_test_connection).pack(side="left", padx=5)
+            ttk.Button(btn_frame, text="Save to .env", command=_save_to_env).pack(side="left", padx=5)
+            ttk.Button(btn_frame, text="Cancel", command=wiz.destroy).pack(side="left", padx=5)
 
-            def _mask_path(p: str) -> str:
-                try:
-                    return os.path.abspath(p)
-                except Exception:
-                    return p
+        ttk.Label(frm, text="Exchange Config:").grid(row=r, column=0, sticky="w", padx=(0, 10), pady=6)
 
-            # -----------------------------
-            # Big, beginner-friendly instructions
-            # -----------------------------
-            intro = (
-                "This trader uses Robinhood's Crypto Trading API credentials.\n\n"
-                "You only do this once. When finished, pt_trader.py can authenticate automatically.\n\n"
-                "✅ What you will do in this window:\n"
-                "  1) Generate a Public Key + Private Key (Ed25519).\n"
-                "  2) Copy the PUBLIC key and paste it into Robinhood to create an API credential.\n"
-                "  3) Robinhood will show you an API Key (usually starts with 'rh...'). Copy it.\n"
-                "  4) Paste that API Key back here and click Save.\n\n"
-                "🧭 EXACTLY where to paste the Public Key on Robinhood (desktop web is best):\n"
-                "  A) Log in to Robinhood on a computer.\n"
-                "  B) Click Account (top-right) → Settings.\n"
-                "  C) Click Crypto.\n"
-                "  D) Scroll down to API Trading and click + Add Key (or Add key).\n"
-                "  E) Paste the Public Key into the Public key field.\n"
-                "  F) Give it any name (example: PowerTrader).\n"
-                "  G) Permissions: this TRADER needs READ + TRADE. (READ-only cannot place orders.)\n"
-                "  H) Click Save. Robinhood shows your API Key — copy it right away (it may only show once).\n\n"
-                "📱 Mobile note: if you can't find API Trading in the app, use robinhood.com in a browser.\n\n"
-                "This wizard will save two files in the same folder as pt_hub.py:\n"
-                "  - r_key.txt    (your API Key)\n"
-                "  - r_secret.txt (your PRIVATE key in base64)  ← keep this secret like a password\n"
-            )
+        exchange_row = ttk.Frame(frm)
+        exchange_row.grid(row=r, column=1, columnspan=2, sticky="ew", pady=6)
+        exchange_row.columnconfigure(0, weight=1)
 
-            intro_lbl = ttk.Label(container, text=intro, justify="left")
-            intro_lbl.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-
-            top_btns = ttk.Frame(container)
-            top_btns.grid(row=1, column=0, sticky="ew", pady=(0, 10))
-            top_btns.columnconfigure(0, weight=1)
-
-            def open_robinhood_page():
-                # Robinhood entry point. User will still need to click into Settings → Crypto → API Trading.
-                webbrowser.open("https://robinhood.com/account/crypto")
-
-            ttk.Button(top_btns, text="Open Robinhood API Credentials page (Crypto)", command=open_robinhood_page).pack(side="left")
-            ttk.Button(top_btns, text="Open Robinhood Crypto Trading API docs", command=lambda: webbrowser.open("https://docs.robinhood.com/crypto/trading/")).pack(side="left", padx=8)
-            ttk.Button(top_btns, text="Open Folder With r_key.txt / r_secret.txt", command=lambda: _open_in_file_manager(self.project_dir)).pack(side="left", padx=8)
-
-            # -----------------------------
-            # Step 1 — Generate keys
-            # -----------------------------
-            step1 = ttk.LabelFrame(container, text="Step 1 — Generate your keys (click once)")
-            step1.grid(row=2, column=0, sticky="nsew", pady=(0, 10))
-            step1.columnconfigure(0, weight=1)
-
-            ttk.Label(step1, text="Public Key (this is what you paste into Robinhood):").grid(row=0, column=0, sticky="w", padx=10, pady=(8, 0))
-
-            pub_box = tk.Text(step1, height=4, wrap="none")
-            pub_box.grid(row=1, column=0, sticky="nsew", padx=10, pady=(6, 10))
-            pub_box.configure(bg=DARK_PANEL, fg=DARK_FG, insertbackground=DARK_FG)
-
-            def _render_public_from_private_b64(priv_b64: str) -> str:
-                """Return Robinhood-compatible Public Key: base64(raw_ed25519_public_key_32_bytes)."""
-                try:
-                    raw = base64.b64decode(priv_b64)
-
-                    # Accept either:
-                    #   - 32 bytes: Ed25519 seed
-                    #   - 64 bytes: NaCl/tweetnacl secretKey (seed + public)
-                    if len(raw) == 64:
-                        seed = raw[:32]
-                    elif len(raw) == 32:
-                        seed = raw
-                    else:
-                        return ""
-
-                    pk = ed25519.Ed25519PrivateKey.from_private_bytes(seed)
-                    pub_raw = pk.public_key().public_bytes(
-                        encoding=serialization.Encoding.Raw,
-                        format=serialization.PublicFormat.Raw,
-                    )
-                    return base64.b64encode(pub_raw).decode("utf-8")
-                except Exception:
-                    return ""
-
-            def _set_pub_text(txt: str) -> None:
-                try:
-                    pub_box.delete("1.0", "end")
-                    pub_box.insert("1.0", txt or "")
-                except Exception:
-                    pass
-
-            # If already configured before, show the public key again (derived from stored private key)
-            if private_b64_state["value"]:
-                _set_pub_text(_render_public_from_private_b64(private_b64_state["value"]))
-
-            def generate_keys():
-                # Generate an Ed25519 keypair (Robinhood expects base64 raw public key bytes)
-                priv = ed25519.Ed25519PrivateKey.generate()
-                pub = priv.public_key()
-
-                seed = priv.private_bytes(
-                    encoding=serialization.Encoding.Raw,
-                    format=serialization.PrivateFormat.Raw,
-                    encryption_algorithm=serialization.NoEncryption(),
-                )
-                pub_raw = pub.public_bytes(
-                    encoding=serialization.Encoding.Raw,
-                    format=serialization.PublicFormat.Raw,
-                )
-
-                # Store PRIVATE key as base64(seed32) because pt_thinker.py uses nacl.signing.SigningKey(seed)
-                # and it requires exactly 32 bytes.
-                private_b64_state["value"] = base64.b64encode(seed).decode("utf-8")
-
-                # Show what you paste into Robinhood: base64(raw public key)
-                _set_pub_text(base64.b64encode(pub_raw).decode("utf-8"))
-
-
-                messagebox.showinfo(
-                    "Step 1 complete",
-                    "Public/Private keys generated.\n\n"
-                    "Next (Robinhood):\n"
-                    "  1) Click 'Copy Public Key' in this window\n"
-                    "  2) On Robinhood (desktop web): Account → Settings → Crypto\n"
-                    "  3) Scroll to 'API Trading' → click '+ Add Key'\n"
-                    "  4) Paste the Public Key (base64) into the 'Public key' field\n"
-                    "  5) Enable permissions READ + TRADE (this trader needs both), then Save\n"
-                    "  6) Robinhood shows an API Key (usually starts with 'rh...') — copy it right away\n\n"
-                    "Then come back here and paste that API Key into the 'API Key' box."
-                )
-
-
-
-            def copy_public_key():
-                txt = (pub_box.get("1.0", "end") or "").strip()
-                if not txt:
-                    messagebox.showwarning("Nothing to copy", "Click 'Generate Keys' first.")
-                    return
-                _copy_to_clipboard(txt, title="Public Key copied")
-
-            step1_btns = ttk.Frame(step1)
-            step1_btns.grid(row=2, column=0, sticky="w", padx=10, pady=(0, 10))
-            ttk.Button(step1_btns, text="Generate Keys", command=generate_keys).pack(side="left")
-            ttk.Button(step1_btns, text="Copy Public Key", command=copy_public_key).pack(side="left", padx=8)
-
-            # -----------------------------
-            # Step 2 — Paste API key (from Robinhood)
-            # -----------------------------
-            step2 = ttk.LabelFrame(container, text="Step 2 — Paste your Robinhood API Key here")
-            step2.grid(row=3, column=0, sticky="nsew", pady=(0, 10))
-            step2.columnconfigure(0, weight=1)
-
-            step2_help = (
-                "In Robinhood, after you add the Public Key, Robinhood will show an API Key.\n"
-                "Paste that API Key below. (It often starts with 'rh.'.)"
-            )
-            ttk.Label(step2, text=step2_help, justify="left").grid(row=0, column=0, sticky="w", padx=10, pady=(8, 0))
-
-            api_key_var = tk.StringVar(value=existing_api_key or "")
-            api_ent = ttk.Entry(step2, textvariable=api_key_var)
-            api_ent.grid(row=1, column=0, sticky="ew", padx=10, pady=(6, 10))
-
-            def _test_credentials() -> None:
-                api_key = (api_key_var.get() or "").strip()
-                priv_b64 = (private_b64_state.get("value") or "").strip()
-
-                if not requests:
-                    messagebox.showerror(
-                        "Missing dependency",
-                        "The 'requests' package is required for the Test button.\n\n"
-                        "Fix: pip install requests\n\n"
-                        "(You can still Save without testing.)"
-                    )
-                    return
-
-                if not priv_b64:
-                    messagebox.showerror("Missing private key", "Step 1: click 'Generate Keys' first.")
-                    return
-                if not api_key:
-                    messagebox.showerror("Missing API key", "Paste the API key from Robinhood into Step 2 first.")
-                    return
-
-                # Safe test: market-data endpoint (no trading)
-                base_url = "https://trading.robinhood.com"
-                path = "/api/v1/crypto/marketdata/best_bid_ask/?symbol=BTC-USD"
-                method = "GET"
-                body = ""
-                ts = int(time.time())
-                msg = f"{api_key}{ts}{path}{method}{body}".encode("utf-8")
-
-                try:
-                    raw = base64.b64decode(priv_b64)
-
-                    # Accept either:
-                    #   - 32 bytes: Ed25519 seed
-                    #   - 64 bytes: NaCl/tweetnacl secretKey (seed + public)
-                    if len(raw) == 64:
-                        seed = raw[:32]
-                    elif len(raw) == 32:
-                        seed = raw
-                    else:
-                        raise ValueError(f"Unexpected private key length: {len(raw)} bytes (expected 32 or 64)")
-
-                    pk = ed25519.Ed25519PrivateKey.from_private_bytes(seed)
-                    sig_b64 = base64.b64encode(pk.sign(msg)).decode("utf-8")
-                except Exception as e:
-                    messagebox.showerror("Bad private key", f"Couldn't use your private key (r_secret.txt).\n\nError:\n{e}")
-                    return
-
-
-                headers = {
-                    "x-api-key": api_key,
-                    "x-timestamp": str(ts),
-                    "x-signature": sig_b64,
-                    "Content-Type": "application/json",
-                }
-
-                try:
-                    resp = requests.get(f"{base_url}{path}", headers=headers, timeout=10)
-                    if resp.status_code >= 400:
-                        # Give layman-friendly hints for common failures
-                        hint = ""
-                        if resp.status_code in (401, 403):
-                            hint = (
-                                "\n\nCommon fixes:\n"
-                                "  • Make sure you pasted the API Key (not the public key).\n"
-                                "  • In Robinhood, ensure the key has permissions READ + TRADE.\n"
-                                "  • If you just created the key, wait 30–60 seconds and try again.\n"
-                            )
-                        messagebox.showerror("Test failed", f"Robinhood returned HTTP {resp.status_code}.\n\n{resp.text}{hint}")
-                        return
-
-                    data = resp.json()
-                    # Try to show something reassuring
-                    ask = None
-                    try:
-                        if data.get("results"):
-                            ask = data["results"][0].get("ask_inclusive_of_buy_spread")
-                    except Exception:
-                        pass
-
-                    messagebox.showinfo(
-                        "Test successful",
-                        "✅ Your API Key + Private Key worked!\n\n"
-                        "Robinhood responded successfully.\n"
-                        f"BTC-USD ask (example): {ask if ask is not None else 'received'}\n\n"
-                        "Next: click Save."
-                    )
-                except Exception as e:
-                    messagebox.showerror("Test failed", f"Couldn't reach Robinhood.\n\nError:\n{e}")
-
-            step2_btns = ttk.Frame(step2)
-            step2_btns.grid(row=2, column=0, sticky="w", padx=10, pady=(0, 10))
-            ttk.Button(step2_btns, text="Test Credentials (safe, no trading)", command=_test_credentials).pack(side="left")
-
-            # -----------------------------
-            # Step 3 — Save
-            # -----------------------------
-            step3 = ttk.LabelFrame(container, text="Step 3 — Save to files (required)")
-            step3.grid(row=4, column=0, sticky="nsew")
-            step3.columnconfigure(0, weight=1)
-
-            ack_var = tk.BooleanVar(value=False)
-            ack = ttk.Checkbutton(
-                step3,
-                text="I understand r_secret.txt is PRIVATE and I will not share it.",
-                variable=ack_var,
-            )
-            ack.grid(row=0, column=0, sticky="w", padx=10, pady=(10, 6))
-
-            save_btns = ttk.Frame(step3)
-            save_btns.grid(row=1, column=0, sticky="w", padx=10, pady=(0, 12))
-
-            def do_save():
-                api_key = (api_key_var.get() or "").strip()
-                priv_b64 = (private_b64_state.get("value") or "").strip()
-
-                if not priv_b64:
-                    messagebox.showerror("Missing private key", "Step 1: click 'Generate Keys' first.")
-                    return
-
-                # Normalize private key so pt_thinker.py can load it:
-                # - Accept 32 bytes (seed) OR 64 bytes (seed+pub) from older hub versions
-                # - Save ONLY base64(seed32) to r_secret.txt
-                try:
-                    raw = base64.b64decode(priv_b64)
-                    if len(raw) == 64:
-                        raw = raw[:32]
-                        priv_b64 = base64.b64encode(raw).decode("utf-8")
-                        private_b64_state["value"] = priv_b64  # keep UI state consistent
-                    elif len(raw) != 32:
-                        messagebox.showerror(
-                            "Bad private key",
-                            f"Your private key decodes to {len(raw)} bytes, but it must be 32 bytes.\n\n"
-                            "Click 'Generate Keys' again to create a fresh keypair."
-                        )
-                        return
-                except Exception as e:
-                    messagebox.showerror(
-                        "Bad private key",
-                        f"Couldn't decode the private key as base64.\n\nError:\n{e}"
-                    )
-                    return
-
-                if not api_key:
-                    messagebox.showerror("Missing API key", "Step 2: paste your API key from Robinhood first.")
-                    return
-                if not bool(ack_var.get()):
-                    messagebox.showwarning(
-                        "Please confirm",
-                        "For safety, please check the box confirming you understand r_secret.txt is private."
-                    )
-                    return
-
-
-                # Small sanity warning (don’t block, just help)
-                if len(api_key) < 10:
-                    if not messagebox.askyesno(
-                        "API key looks short",
-                        "That API key looks unusually short. Are you sure you pasted the API Key from Robinhood?"
-                    ):
-                        return
-
-                # Back up existing files (so user can undo mistakes)
-                try:
-                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    if os.path.isfile(key_path):
-                        shutil.copy2(key_path, f"{key_path}.bak_{ts}")
-                    if os.path.isfile(secret_path):
-                        shutil.copy2(secret_path, f"{secret_path}.bak_{ts}")
-                except Exception:
-                    pass
-
-                try:
-                    with open(key_path, "w", encoding="utf-8") as f:
-                        f.write(api_key)
-                    with open(secret_path, "w", encoding="utf-8") as f:
-                        f.write(priv_b64)
-                except Exception as e:
-                    messagebox.showerror("Save failed", f"Couldn't write the credential files.\n\nError:\n{e}")
-                    return
-
-                _refresh_api_status()
-                messagebox.showinfo(
-                    "Saved",
-                    "✅ Saved!\n\n"
-                    "The trader will automatically read these files next time it starts:\n"
-                    f"  API Key → {_mask_path(key_path)}\n"
-                    f"  Private Key → {_mask_path(secret_path)}\n\n"
-                    "Next steps:\n"
-                    "  1) Close this window\n"
-                    "  2) Start the trader (pt_trader.py)\n"
-                    "If something fails, come back here and click 'Test Credentials'."
-                )
-                wiz.destroy()
-
-            ttk.Button(save_btns, text="Save", command=do_save).pack(side="left")
-            ttk.Button(save_btns, text="Close", command=wiz.destroy).pack(side="left", padx=8)
-
-        ttk.Label(frm, text="Robinhood API:").grid(row=r, column=0, sticky="w", padx=(0, 10), pady=6)
-
-        api_row = ttk.Frame(frm)
-        api_row.grid(row=r, column=1, columnspan=2, sticky="ew", pady=6)
-        api_row.columnconfigure(0, weight=1)
-
-        ttk.Label(api_row, textvariable=api_status_var).grid(row=0, column=0, sticky="w")
-        ttk.Button(api_row, text="Setup Wizard", command=_open_robinhood_api_wizard).grid(row=0, column=1, sticky="e", padx=(10, 0))
-        ttk.Button(api_row, text="Open Folder", command=_open_api_folder).grid(row=0, column=2, sticky="e", padx=(8, 0))
-        ttk.Button(api_row, text="Clear", command=_clear_api_files).grid(row=0, column=3, sticky="e", padx=(8, 0))
+        ttk.Label(exchange_row, textvariable=exchange_status_var).grid(row=0, column=0, sticky="w")
+        ttk.Button(exchange_row, text="Setup Wizard", command=_open_exchange_wizard).grid(row=0, column=1, sticky="e", padx=(10, 0))
+        ttk.Button(exchange_row, text="Open Folder", command=_open_env_folder).grid(row=0, column=2, sticky="e", padx=(8, 0))
+        ttk.Button(exchange_row, text="Clear", command=_clear_env_file).grid(row=0, column=3, sticky="e", padx=(8, 0))
 
         r += 1
 
-        _refresh_api_status()
+        _refresh_exchange_status()
+
+        # --- Allocation Configuration Section ---
+        ttk.Separator(frm, orient="horizontal").grid(row=r, column=0, columnspan=3, sticky="ew", pady=10)
+        r += 1
+
+        ttk.Label(frm, text="Trade Allocation:", font=("Arial", 10, "bold")).grid(row=r, column=0, sticky="w", pady=6)
+        r += 1
+
+        alloc_frame = ttk.Frame(frm)
+        alloc_frame.grid(row=r, column=0, columnspan=3, sticky="ew", pady=6)
+
+        ttk.Button(
+            alloc_frame,
+            text="Configure Global Defaults",
+            command=self._open_allocation_defaults_dialog
+        ).pack(side="left", padx=5)
+
+        ttk.Button(
+            alloc_frame,
+            text="Configure Per-Coin Settings",
+            command=self._open_per_coin_allocation_dialog
+        ).pack(side="left", padx=5)
+
+        r += 1
 
 
         ttk.Separator(frm, orient="horizontal").grid(row=r, column=0, columnspan=3, sticky="ew", pady=10); r += 1
@@ -5194,75 +4687,14 @@ class PowerTraderHub(tk.Tk):
                 # Track coins before changes so we can detect newly added coins
                 prev_coins = set([str(c).strip().upper() for c in (self.settings.get("coins") or []) if str(c).strip()])
 
-                self.settings["main_neural_dir"] = main_dir_var.get().strip()
+                # If the neural dir is the same as project_dir, save empty string to preserve the dynamic default
+                new_neural_dir = main_dir_var.get().strip()
+                if new_neural_dir == self.project_dir:
+                    self.settings["main_neural_dir"] = ""
+                else:
+                    self.settings["main_neural_dir"] = new_neural_dir
                 self.settings["coins"] = [c.strip().upper() for c in coins_var.get().split(",") if c.strip()]
-                self.settings["trade_start_level"] = max(1, min(int(float(trade_start_level_var.get().strip())), 7))
-
-                sap = (start_alloc_pct_var.get() or "").strip().replace("%", "")
-                self.settings["start_allocation_pct"] = max(0.0, float(sap or 0.0))
-
-                dm = (dca_mult_var.get() or "").strip()
-                try:
-                    dm_f = float(dm)
-                except Exception:
-                    dm_f = float(self.settings.get("dca_multiplier", DEFAULT_SETTINGS.get("dca_multiplier", 2.0)) or 2.0)
-                if dm_f < 0.0:
-                    dm_f = 0.0
-                self.settings["dca_multiplier"] = dm_f
-
-                raw_dca = (dca_levels_var.get() or "").replace(",", " ").split()
-                dca_levels = []
-                for tok in raw_dca:
-                    try:
-                        dca_levels.append(float(tok))
-                    except Exception:
-                        pass
-                if not dca_levels:
-                    dca_levels = list(DEFAULT_SETTINGS.get("dca_levels", []))
-                self.settings["dca_levels"] = dca_levels
-
-                md = (max_dca_var.get() or "").strip()
-                try:
-                    md_i = int(float(md))
-                except Exception:
-                    md_i = int(self.settings.get("max_dca_buys_per_24h", DEFAULT_SETTINGS.get("max_dca_buys_per_24h", 2)) or 2)
-                if md_i < 0:
-                    md_i = 0
-                self.settings["max_dca_buys_per_24h"] = md_i
-
-
-                # --- Trailing PM settings ---
-                try:
-                    pm0 = float((pm_no_dca_var.get() or "").strip().replace("%", "") or 0.0)
-                except Exception:
-                    pm0 = float(self.settings.get("pm_start_pct_no_dca", DEFAULT_SETTINGS.get("pm_start_pct_no_dca", 5.0)) or 5.0)
-                if pm0 < 0.0:
-                    pm0 = 0.0
-                self.settings["pm_start_pct_no_dca"] = pm0
-
-                try:
-                    pm1 = float((pm_with_dca_var.get() or "").strip().replace("%", "") or 0.0)
-                except Exception:
-                    pm1 = float(self.settings.get("pm_start_pct_with_dca", DEFAULT_SETTINGS.get("pm_start_pct_with_dca", 2.5)) or 2.5)
-                if pm1 < 0.0:
-                    pm1 = 0.0
-                self.settings["pm_start_pct_with_dca"] = pm1
-
-                try:
-                    tg = float((trailing_gap_var.get() or "").strip().replace("%", "") or 0.0)
-                except Exception:
-                    tg = float(self.settings.get("trailing_gap_pct", DEFAULT_SETTINGS.get("trailing_gap_pct", 0.5)) or 0.5)
-                if tg < 0.0:
-                    tg = 0.0
-                self.settings["trailing_gap_pct"] = tg
-
-
-
                 self.settings["hub_data_dir"] = hub_dir_var.get().strip()
-
-
-
-
                 self.settings["script_neural_runner2"] = neural_script_var.get().strip()
                 self.settings["script_neural_trainer"] = trainer_script_var.get().strip()
                 self.settings["script_trader"] = trader_script_var.get().strip()
@@ -5317,6 +4749,260 @@ class PowerTraderHub(tk.Tk):
         ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="left", padx=8)
 
 
+    # ---- allocation configuration dialogs ----
+
+    def _open_allocation_defaults_dialog(self):
+        """Open dialog to configure global allocation defaults."""
+        dlg = tk.Toplevel(self)
+        dlg.title("Global Allocation Defaults")
+        dlg.geometry("650x600")
+        dlg.resizable(False, False)
+
+        container = ttk.Frame(dlg, padding=15)
+        container.pack(fill="both", expand=True)
+
+        defaults = self.settings.get("allocation_defaults", {})
+
+        # Strategy selection
+        ttk.Label(container, text="Allocation Strategy:", font=("Arial", 10, "bold")).grid(row=0, column=0, sticky="w", pady=5)
+        strategy_var = tk.StringVar(value=defaults.get("strategy", "percentage_per_coin"))
+
+        strategies = [
+            ("Fixed Amount ($)", "fixed_amount"),
+            ("Percentage of Account (%)", "percentage_of_account"),
+            ("Percentage per Coin (current default)", "percentage_per_coin"),
+            ("Risk-Based (% of available buying power)", "risk_based")
+        ]
+
+        for idx, (label, value) in enumerate(strategies):
+            ttk.Radiobutton(
+                container,
+                text=label,
+                variable=strategy_var,
+                value=value
+            ).grid(row=idx+1, column=0, columnspan=2, sticky="w", padx=20, pady=2)
+
+        # Initial amount
+        ttk.Label(container, text="Initial Amount:", font=("Arial", 10)).grid(row=6, column=0, sticky="w", pady=(15, 5))
+        amount_var = tk.StringVar(value=str(defaults.get("initial_amount", 0.005)))
+        ttk.Entry(container, textvariable=amount_var, width=15).grid(row=6, column=1, sticky="w", pady=(15, 5))
+        ttk.Label(container, text="($ for fixed amount, % for others)", font=("Arial", 8, "italic")).grid(row=7, column=0, columnspan=2, sticky="w")
+
+        # DCA Multiplier
+        ttk.Label(container, text="DCA Multiplier:", font=("Arial", 10)).grid(row=8, column=0, sticky="w", pady=(10, 5))
+        dca_mult_var = tk.StringVar(value=str(defaults.get("dca_multiplier", 2.0)))
+        ttk.Entry(container, textvariable=dca_mult_var, width=15).grid(row=8, column=1, sticky="w", pady=(10, 5))
+        ttk.Label(container, text="(e.g., 2.0 = double position size each DCA level)", font=("Arial", 8, "italic")).grid(row=9, column=0, columnspan=2, sticky="w")
+
+        # Max DCA Levels
+        ttk.Label(container, text="Max DCA Levels:", font=("Arial", 10)).grid(row=10, column=0, sticky="w", pady=(10, 5))
+        max_levels_var = tk.StringVar(value=str(defaults.get("dca_max_levels", 7)))
+        ttk.Entry(container, textvariable=max_levels_var, width=15).grid(row=10, column=1, sticky="w", pady=(10, 5))
+        ttk.Label(container, text="(maximum number of DCA stages)", font=("Arial", 8, "italic")).grid(row=11, column=0, columnspan=2, sticky="w")
+
+        # Start From Level
+        ttk.Label(container, text="Skip Initial Levels:", font=("Arial", 10)).grid(row=12, column=0, sticky="w", pady=(10, 5))
+        start_from_var = tk.StringVar(value=str(defaults.get("dca_start_from_level", 0)))
+        ttk.Entry(container, textvariable=start_from_var, width=15).grid(row=12, column=1, sticky="w", pady=(10, 5))
+        ttk.Label(container, text="(0 = use all levels, 1 = skip -2.5%, 2 = skip -2.5% and -5%, etc.)", font=("Arial", 8, "italic")).grid(row=13, column=0, columnspan=2, sticky="w")
+
+        # Minimum Trade Amount
+        ttk.Label(container, text="Minimum Trade ($):", font=("Arial", 10)).grid(row=14, column=0, sticky="w", pady=(10, 5))
+        min_var = tk.StringVar(value=str(defaults.get("min_trade_amount", 0.5)))
+        ttk.Entry(container, textvariable=min_var, width=15).grid(row=14, column=1, sticky="w", pady=(10, 5))
+        ttk.Label(container, text="(minimum dollar amount for any trade)", font=("Arial", 8, "italic")).grid(row=15, column=0, columnspan=2, sticky="w")
+
+        # Save button
+        def save_defaults():
+            try:
+                self.settings["allocation_defaults"] = {
+                    "strategy": strategy_var.get(),
+                    "initial_amount": float(amount_var.get()),
+                    "dca_multiplier": float(dca_mult_var.get()),
+                    "dca_max_levels": int(max_levels_var.get()),
+                    "dca_start_from_level": int(start_from_var.get()),
+                    "min_trade_amount": float(min_var.get())
+                }
+                self._save_settings()
+                messagebox.showinfo("Saved", "Global allocation defaults updated successfully!")
+                dlg.destroy()
+            except ValueError as e:
+                messagebox.showerror("Invalid Input", f"Please enter valid numbers:\n{e}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to save settings:\n{e}")
+
+        btn_frame = ttk.Frame(container)
+        btn_frame.grid(row=16, column=0, columnspan=2, pady=20)
+        ttk.Button(btn_frame, text="Save", command=save_defaults, width=12).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=dlg.destroy, width=12).pack(side="left", padx=5)
+
+    def _open_per_coin_allocation_dialog(self):
+        """Open dialog to select and configure individual coins."""
+        dlg = tk.Toplevel(self)
+        dlg.title("Per-Coin Allocation Settings")
+        dlg.geometry("600x700")
+
+        container = ttk.Frame(dlg, padding=15)
+        container.pack(fill="both", expand=True)
+
+        ttk.Label(container, text="Configure allocation settings for individual coins:", font=("Arial", 11, "bold")).pack(pady=10)
+        ttk.Label(container, text="Coins without custom settings will use the global defaults.", font=("Arial", 9, "italic")).pack(pady=(0, 15))
+
+        coins = self.settings.get("coins", [])
+        per_coin_settings = self.settings.get("allocation_per_coin", {})
+
+        # Scrollable frame for coin list
+        canvas = tk.Canvas(container, height=400)
+        scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # List of coins with status
+        for coin in coins:
+            coin_frame = ttk.Frame(scrollable_frame)
+            coin_frame.pack(fill="x", pady=5, padx=10)
+
+            has_custom = coin in per_coin_settings
+            status = "Custom settings" if has_custom else "Using global defaults"
+            status_icon = "✅" if has_custom else "⚙️"
+
+            ttk.Label(coin_frame, text=f"{status_icon} {coin}:", font=("Arial", 10, "bold"), width=12).pack(side="left")
+            ttk.Label(coin_frame, text=status, width=25).pack(side="left")
+
+            ttk.Button(
+                coin_frame,
+                text="Configure",
+                command=lambda c=coin: self._open_coin_config_dialog(c, dlg),
+                width=12
+            ).pack(side="left", padx=5)
+
+            if has_custom:
+                ttk.Button(
+                    coin_frame,
+                    text="Reset to Defaults",
+                    command=lambda c=coin: self._reset_coin_config(c, dlg),
+                    width=15
+                ).pack(side="left")
+
+        ttk.Button(container, text="Close", command=dlg.destroy, width=15).pack(pady=20)
+
+    def _open_coin_config_dialog(self, coin: str, parent_dlg):
+        """Open configuration dialog for a specific coin."""
+        dlg = tk.Toplevel(parent_dlg)
+        dlg.title(f"{coin} Allocation Settings")
+        dlg.geometry("650x600")
+        dlg.resizable(False, False)
+
+        container = ttk.Frame(dlg, padding=15)
+        container.pack(fill="both", expand=True)
+
+        # Get current config (merge defaults + overrides)
+        defaults = self.settings.get("allocation_defaults", {})
+        per_coin = self.settings.get("allocation_per_coin", {})
+        current = {**defaults, **per_coin.get(coin, {})}
+
+        ttk.Label(container, text=f"Custom Settings for {coin}", font=("Arial", 12, "bold")).pack(pady=10)
+        ttk.Label(container, text="These settings will override the global defaults for this coin.", font=("Arial", 9, "italic")).pack(pady=(0, 15))
+
+        # Strategy selection
+        ttk.Label(container, text="Allocation Strategy:", font=("Arial", 10, "bold")).grid(row=0, column=0, sticky="w", pady=5)
+        strategy_var = tk.StringVar(value=current.get("strategy", "percentage_per_coin"))
+
+        strategies = [
+            ("Fixed Amount ($)", "fixed_amount"),
+            ("Percentage of Account (%)", "percentage_of_account"),
+            ("Percentage per Coin", "percentage_per_coin"),
+            ("Risk-Based (% of available)", "risk_based")
+        ]
+
+        for idx, (label, value) in enumerate(strategies):
+            ttk.Radiobutton(
+                container,
+                text=label,
+                variable=strategy_var,
+                value=value
+            ).grid(row=idx+1, column=0, columnspan=2, sticky="w", padx=20, pady=2)
+
+        # Initial amount
+        ttk.Label(container, text="Initial Amount:", font=("Arial", 10)).grid(row=6, column=0, sticky="w", pady=(15, 5))
+        amount_var = tk.StringVar(value=str(current.get("initial_amount", 0.005)))
+        ttk.Entry(container, textvariable=amount_var, width=15).grid(row=6, column=1, sticky="w", pady=(15, 5))
+        ttk.Label(container, text="($ for fixed, % for others)", font=("Arial", 8, "italic")).grid(row=7, column=0, columnspan=2, sticky="w")
+
+        # DCA Multiplier
+        ttk.Label(container, text="DCA Multiplier:", font=("Arial", 10)).grid(row=8, column=0, sticky="w", pady=(10, 5))
+        dca_mult_var = tk.StringVar(value=str(current.get("dca_multiplier", 2.0)))
+        ttk.Entry(container, textvariable=dca_mult_var, width=15).grid(row=8, column=1, sticky="w", pady=(10, 5))
+        ttk.Label(container, text="(e.g., 2.0 = double position each DCA)", font=("Arial", 8, "italic")).grid(row=9, column=0, columnspan=2, sticky="w")
+
+        # Max DCA Levels
+        ttk.Label(container, text="Max DCA Levels:", font=("Arial", 10)).grid(row=10, column=0, sticky="w", pady=(10, 5))
+        max_levels_var = tk.StringVar(value=str(current.get("dca_max_levels", 7)))
+        ttk.Entry(container, textvariable=max_levels_var, width=15).grid(row=10, column=1, sticky="w", pady=(10, 5))
+
+        # Start From Level
+        ttk.Label(container, text="Skip Initial Levels:", font=("Arial", 10)).grid(row=11, column=0, sticky="w", pady=(10, 5))
+        start_from_var = tk.StringVar(value=str(current.get("dca_start_from_level", 0)))
+        ttk.Entry(container, textvariable=start_from_var, width=15).grid(row=11, column=1, sticky="w", pady=(10, 5))
+
+        # Minimum Trade Amount
+        ttk.Label(container, text="Minimum Trade ($):", font=("Arial", 10)).grid(row=12, column=0, sticky="w", pady=(10, 5))
+        min_var = tk.StringVar(value=str(current.get("min_trade_amount", 0.5)))
+        ttk.Entry(container, textvariable=min_var, width=15).grid(row=12, column=1, sticky="w", pady=(10, 5))
+
+        def save_coin_config():
+            try:
+                if "allocation_per_coin" not in self.settings:
+                    self.settings["allocation_per_coin"] = {}
+
+                self.settings["allocation_per_coin"][coin] = {
+                    "strategy": strategy_var.get(),
+                    "initial_amount": float(amount_var.get()),
+                    "dca_multiplier": float(dca_mult_var.get()),
+                    "dca_max_levels": int(max_levels_var.get()),
+                    "dca_start_from_level": int(start_from_var.get()),
+                    "min_trade_amount": float(min_var.get())
+                }
+                self._save_settings()
+                messagebox.showinfo("Saved", f"{coin} allocation settings updated successfully!")
+                dlg.destroy()
+                parent_dlg.destroy()
+                self._open_per_coin_allocation_dialog()  # Refresh
+            except ValueError as e:
+                messagebox.showerror("Invalid Input", f"Please enter valid numbers:\n{e}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to save settings:\n{e}")
+
+        btn_frame = ttk.Frame(container)
+        btn_frame.grid(row=13, column=0, columnspan=2, pady=20)
+        ttk.Button(btn_frame, text="Save", command=save_coin_config, width=12).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=dlg.destroy, width=12).pack(side="left", padx=5)
+
+    def _reset_coin_config(self, coin: str, parent_dlg):
+        """Remove custom config for a coin (revert to defaults)."""
+        result = messagebox.askyesno(
+            "Reset Configuration",
+            f"Reset {coin} to use global defaults?\n\nThis will remove all custom settings for {coin}."
+        )
+        if result:
+            per_coin = self.settings.get("allocation_per_coin", {})
+            if coin in per_coin:
+                del per_coin[coin]
+                self._save_settings()
+                messagebox.showinfo("Reset Complete", f"{coin} now uses global defaults.")
+                parent_dlg.destroy()
+                self._open_per_coin_allocation_dialog()  # Refresh
+
     # ---- close ----
 
     def _on_close(self) -> None:
@@ -5331,3 +5017,4 @@ class PowerTraderHub(tk.Tk):
 if __name__ == "__main__":
     app = PowerTraderHub()
     app.mainloop()
+
