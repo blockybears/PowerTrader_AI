@@ -8,8 +8,6 @@ This is a fork of the original **[PowerTrader_AI project]([https://python.org](h
 
 PowerTrader_AI is a fully automated crypto trading bot powered by a custom price prediction AI and a structured/tiered DCA system.
 
-> “It’s an instance-based (kNN/kernel-style) predictor with online per-instance reliability weighting, used as a multi-timeframe trading signal.” - ChatGPT on the type of AI used in this trading bot.
-
 When training for a coin, the AI analyzes the entire price history on multiple timeframes, saving each pattern it sees and what happened on the next candle. It uses these saved patterns to generate a predicted candle by taking a weighted average of the closest matches in memory to the current pattern. This process is repeated for each timeframe from 1 hour to 1 week. The low and high prices from these predicted candles are used as trading signals.
 
 After a candle closes, the AI checks its prediction accuracy and adjusts the weight of the "memory patterns" used, improving future predictions.
