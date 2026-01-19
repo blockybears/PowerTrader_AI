@@ -1,6 +1,6 @@
 # PowerTrader AI (CCXT Fork)
 
-This is a fork of the original **[PowerTrader_AI project]([https://python.org](https://github.com/garagesteve1155/PowerTrader_AI))**. This version has been modified to remove the dependency on Robinhood and now uses the **CCXT library**, enabling it to connect to over 100 different cryptocurrency exchanges like KuCoin, Binance, Coinbase, and more.
+This is a fork of the original **[PowerTrader_AI project](https://github.com/garagesteve1155/PowerTrader_AI)**. This version has been modified to remove the dependency on Robinhood and now uses the **CCXT library**, enabling it to connect to over 100 different cryptocurrency exchanges like KuCoin, Binance, Coinbase, and more.
 
 ---
 
